@@ -6,9 +6,9 @@ This repository contains an R Markdown analysis titled EarlyResults.Rmd, which p
 
 Current Repository Structure
 DA401Project/
-│
+│--- Experiments
 ├── EarlyResults.Rmd                     # Main analysis script
-├── DA401 Data/                          # Folder containing input and output data
+├── Data/                          # Folder containing input and output data
 │   ├── VIIRS_Region_Only.tif            # Input raster file (light pollution)
 │   ├── ACS_County_Data_5states.geojson  # Generated ACS data
 │   ├── GWR_Coefficients_Counties.geojson # GWR model output
