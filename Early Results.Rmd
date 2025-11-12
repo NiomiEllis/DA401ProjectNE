@@ -1,0 +1,478 @@
+---
+title: "EarlyResults"
+output: html_document
+date: "2025-11-07"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+```{r}
+# Required packages
+pkgs <- c("terra", "sf", "sp", "dplyr", "tidycensus", "exactextractr",
+          "GWmodel", "tmap", "RColorBrewer", "classInt")
+installed <- pkgs %in% installed.packages()
+if (any(!installed)) install.packages(pkgs[!installed])
+
+# Load libraries
+library(terra)         # raster processing 
+library(sf)            # spatial vector handling
+library(sp)            # spatial (for GWmodel compatibility)
+library(dplyr)         # data wrangling
+library(tidycensus)    # census API
+library(exactextractr) # high-quality zonal stats
+library(GWmodel)       # geographically weighted regression
+library(tmap)          # mapping
+library(RColorBrewer)  # color palettes
+library(classInt)      # class intervals for mapping
+library(ggplot2)       # for plotting
+library(viridis)       # for color scale
+library(ggthemes)      # for clean map theme
+library(tigris)
+library(spdep)
+library(viridis)
+library(spgwr)
+
+
+# Set working directory to project root 
+setwd("C:/Users/niomi/Documents/DA401Project")
+
+# Reassurance: show where I'm running from
+getwd()
+```
+
+
+
+Here I will Load data: VIIRS raster (cropped) and ACS county data
+
+```{r}
+
+
+viirs_file <- "DA401 Data/VIIRS_Region_Only.tif"
+viirs <- rast(viirs_file) # terra SpatRaster (on-disk)
+
+
+# Census API key
+census_api_key("3252b383d918a52530783b238ee40b6fb625e43b", install = FALSE)
+
+# Define target states
+my_states <- c("PA","OH","MD","NJ","NY")
+
+# Define ACS variables
+vars <- c(median_income = "B19013_001",
+          poverty_count = "B17001_002",
+          total_pop = "B01003_001",
+          white = "B02001_002",
+          bachelors = "B15003_022")
+
+# Pull ACS data with geometry
+counties_sf <- get_acs(geography = "county",
+                       variables = vars,
+                       state = my_states,
+                       year = 2022,
+                       survey = "acs5",
+                       geometry = TRUE,
+                       output = "wide")
+
+# Create new variables
+counties_sf <- counties_sf %>%
+  mutate(
+    poverty_rate = 100 * (poverty_countE / total_popE),
+    pct_nonwhite = 100 * (1 - (whiteE / total_popE)),
+    median_income = median_incomeE,
+    pop = total_popE,
+    educ_bach_pct = 100 * (bachelorsE / total_popE)
+  ) %>%
+  select(GEOID, NAME, median_income, poverty_rate, pct_nonwhite, educ_bach_pct, pop, geometry)
+
+# Save ACS data
+st_write(counties_sf, "DA401 Data/ACS_County_Data_5states.geojson", delete_dsn = TRUE, quiet = TRUE)
+
+
+
+
+
+```
+
+
+```{r}
+# Checking VIIRS raster info
+print(viirs)
+
+# Check tgat CRS and count of counties
+st_crs(counties_sf)
+nrow(counties_sf)
+```
+
+
+I will now extract mean radiance per county 
+
+```{r}
+# Reproject to VIIRS CRS
+counties_proj <- st_transform(counties_sf, crs(viirs))
+
+# Convert to raster for exactextractr
+viirs_raster <- raster::raster(viirs_file)
+
+
+# Extract mean radiance
+counties_proj$viirs_mean <- exactextractr::exact_extract(viirs_raster, counties_proj, 'mean')
+
+# Join mean radiance back
+counties_sf <- counties_sf %>%
+  left_join(st_set_geometry(counties_proj, NULL) %>% select(GEOID, viirs_mean), by = "GEOID")
+
+# Summary of radiance
+summary(counties_sf$viirs_mean)
+hist(counties_sf$viirs_mean, breaks = 50, main = "Distribution of County Mean Radiance", xlab = "Mean Radiance")
+
+```
+
+
+
+Making Marginalization index
+
+```{r}
+# Convert to numeric and handle missing values
+counties_sf <- counties_sf %>%
+  mutate(
+    poverty_rate = as.numeric(poverty_rate),
+    pct_nonwhite = as.numeric(pct_nonwhite),
+    median_income = as.numeric(median_income),
+    educ_bach_pct = as.numeric(educ_bach_pct)
+  ) %>%
+  mutate(
+    poverty_rate = ifelse(is.na(poverty_rate), median(poverty_rate, na.rm=TRUE), poverty_rate),
+    pct_nonwhite = ifelse(is.na(pct_nonwhite), median(pct_nonwhite, na.rm=TRUE), pct_nonwhite),
+    median_income = ifelse(is.na(median_income), median(median_income, na.rm=TRUE), median_income),
+    educ_bach_pct = ifelse(is.na(educ_bach_pct), median(educ_bach_pct, na.rm=TRUE), educ_bach_pct)
+  )
+
+# Compute z-scores
+counties_sf <- counties_sf %>%
+  mutate(
+    z_poverty = scale(poverty_rate),
+    z_nonwhite = scale(pct_nonwhite),
+    z_medincome = scale(median_income),
+    z_edu = scale(educ_bach_pct)
+  ) %>%
+  mutate(
+    marginalized_index_raw = z_poverty + z_nonwhite - z_medincome - z_edu
+  ) %>%
+  mutate(
+    marginalized_index = scale(marginalized_index_raw)
+  )
+
+# Flag top 30% as marginalized
+threshold <- quantile(counties_sf$marginalized_index, probs = 0.70, na.rm = TRUE)
+counties_sf <- counties_sf %>%
+  mutate(marginalized_flag = ifelse(marginalized_index >= threshold, 1, 0))
+
+# Summary of index
+summary(counties_sf$marginalized_index)
+table(counties_sf$marginalized_flag)
+```
+
+Preparing for GWR
+```{r}
+
+# Filter and convert to Spatial
+gwr_sf <- counties_sf %>% filter(!is.na(viirs_mean))
+gwr_sp <- as(gwr_sf, "Spatial")
+
+# Define model formula
+gwr_formula <- viirs_mean ~ marginalized_index + median_income + pop
+
+# Scatterplot
+plot(gwr_sf$marginalized_index, gwr_sf$viirs_mean, main = "Mean Radiance vs Marginalized Index",
+     xlab = "Marginalized Index (z)", ylab = "Mean Radiance")
+abline(lm(viirs_mean ~ marginalized_index, data = gwr_sf), col = "red")
+
+
+
+```
+
+
+
+gwr bandwidth model
+```{r}
+bw <- bw.gwr(gwr_formula, data = gwr_sp, approach = "CV", adaptive = TRUE)
+bw
+
+# Run GWR
+gwr_res <- gwr.basic(gwr_formula, data = gwr_sp, bw = bw, adaptive = TRUE)
+
+# Inspect structure
+str(gwr_res$SDF)
+
+```
+
+
+
+
+saving output
+```{r}
+coeffs_sf <- st_as_sf(gwr_res$SDF)
+st_write(coeffs_sf, "DA401 Data/GWR_Coefficients_Counties.geojson", delete_dsn = TRUE, quiet = TRUE)
+writeRaster(rasterize(vect(coeffs_sf), rast(viirs), field = "marginalized_index"), 
+            "DA401 Data/GWR_marginalized_coef_raster.tif", overwrite = TRUE)
+
+# Printing done message
+cat("Data processing complete.\n")
+```
+
+
+Making a new visual that is more effective, I will be maing a Choropleth graph
+
+```{r}
+
+gwr_counties <- st_read("C:/Users/niomi/Documents/DA401Project/Da401 Data/GWR_Coefficients_Counties.geojson")
+
+# Inspect structure to find the coefficient column name
+
+names(gwr_counties)
+# assume the coefficient column is named "coef_marginalized"
+# if not, replace below with the correct column name
+
+
+# Handling any invalid geometries
+
+gwr_counties <- st_make_valid(gwr_counties)
+
+#-------------------------------------------------------------
+#  Create breaks for better color scaling
+# This trims extreme outliers andhelps reveal variation
+
+coef_vals <- gwr_counties$marginalized_index
+lower_lim <- quantile(coef_vals, 0.05, na.rm = TRUE)
+upper_lim <- quantile(coef_vals, 0.95, na.rm = TRUE)
+
+
+# Plotting choropleth map
+
+ggplot() +
+  geom_sf(data = gwr_counties, aes(fill = marginalized_index), color = "white", size = 0.1) +
+  scale_fill_viridis(
+    option = "mako",       
+    direction = -1,        # reverse for clarity
+    limits = c(lower_lim, upper_lim),
+    name = "GWR Coefficient"
+  ) +
+  labs(
+    title = "Geographically Weighted Regression Coefficients by County",
+    subtitle = "Marginalization Index Effect on Light Pollution (VIIRS, 2024)",
+    caption = "Source: VIIRS 2024 data and Census ACS 2023"
+  ) +
+  theme_map() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 11),
+    legend.position = "right",
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 8)
+  )
+
+
+
+```
+
+
+
+Trying the visual again but adding in state boarders
+
+```{r}
+
+
+options(tigris_use_cache = TRUE)
+
+# Get state boundaries for your 5 states
+states <- states(cb = TRUE) %>%
+  filter(STUSPS %in% c("PA", "OH", "NY", "NJ", "MD")) %>%
+  st_transform(st_crs(gwr_counties))
+
+# Compute limits for color scale (so range is balanced)
+lower_lim <- quantile(gwr_counties$marginalized_index, 0.05, na.rm = TRUE)
+upper_lim <- quantile(gwr_counties$marginalized_index, 0.95, na.rm = TRUE)
+
+# Choropleth with both county and state borders
+ggplot() +
+  geom_sf(data = gwr_counties, aes(fill = marginalized_index), color = "white", size = 0.1) +  # counties
+  geom_sf(data = states, fill = NA, color = "gray30", size = 0.8) +  # thick state borders
+  scale_fill_viridis(
+    option = "mako",
+    direction = -1,
+    limits = c(lower_lim, upper_lim),
+    name = "GWR Coefficient"
+  ) +
+  labs(
+    title = "Geographically Weighted Regression Coefficients by County",
+    subtitle = "Marginalization Index Effect on Light Pollution (VIIRS, 2024)",
+    caption = "Source: VIIRS 2024 data and Census ACS 2023"
+  ) +
+  theme_map() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 11),
+    legend.position = "right",
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 8)
+  )
+
+
+
+```
+
+
+
+
+```{r}
+
+# Local R2 Choropleth for GWR Model
+
+
+
+#  Get state boundaries for PA, OH, NY, NJ, MD
+
+states <- states(cb = TRUE) %>%
+  filter(STUSPS %in% c("PA", "OH", "NY", "NJ", "MD")) %>%
+  st_transform(st_crs(gwr_counties))
+
+
+# Define color scale limits for cleaner visualization
+
+lower_lim_r2 <- quantile(gwr_counties$Local_R2, 0.05, na.rm = TRUE)
+upper_lim_r2 <- quantile(gwr_counties$Local_R2, 0.95, na.rm = TRUE)
+
+# Create choropleth of Local R²
+
+ggplot() +
+  geom_sf(data = gwr_counties, aes(fill = Local_R2), color = "white", size = 0.1) +   # county-level
+  geom_sf(data = states, fill = NA, color = "gray30", size = 0.8) +                   # state borders
+  scale_fill_viridis(
+    option = "plasma",       # bright and clear gradient
+    direction = -1,          # reverse to emphasize high R2
+    limits = c(lower_lim_r2, upper_lim_r2),
+    name = "Local R²"
+  ) +
+  labs(
+    title = "Local R² of GWR Model by County",
+    subtitle = "Strength of Relationship Between Marginalization and Light Pollution (VIIRS, 2024)",
+    caption = "Source: VIIRS 2024 data and Census ACS 2023"
+  ) +
+  theme_map() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 11),
+    legend.position = "right",
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 8)
+  )
+
+# Summary of Local R2 values
+summary(gwr_counties$Local_R2)
+
+
+
+
+
+
+
+```
+
+
+
+
+
+Getting more polished results of GWR to understand output
+
+
+```{r}
+
+# View column names to confirm variable names
+names(gwr_counties)
+
+# Summarize the local coefficients for each variable
+summary(gwr_counties$Intercept)
+summary(gwr_counties$marginalized_index)
+summary(gwr_counties$median_income)
+summary(gwr_counties$pop)
+
+# OPTIONAL: Create a quick summary table of all coefficients
+coef_summary <- data.frame(
+  Variable = c("Intercept", "Marginalized Index", "Median Income", "Population"),
+  Mean = c(mean(gwr_counties$Intercept, na.rm = TRUE),
+           mean(gwr_counties$marginalized_index, na.rm = TRUE),
+           mean(gwr_counties$median_income, na.rm = TRUE),
+           mean(gwr_counties$pop, na.rm = TRUE)),
+  Min = c(min(gwr_counties$Intercept, na.rm = TRUE),
+          min(gwr_counties$marginalized_index, na.rm = TRUE),
+          min(gwr_counties$median_income, na.rm = TRUE),
+          min(gwr_counties$pop, na.rm = TRUE)),
+  Max = c(max(gwr_counties$Intercept, na.rm = TRUE),
+          max(gwr_counties$marginalized_index, na.rm = TRUE),
+          max(gwr_counties$median_income, na.rm = TRUE),
+          max(gwr_counties$pop, na.rm = TRUE))
+)
+
+print(coef_summary)
+
+
+
+```
+
+
+```{r}
+
+
+# Load state boundaries for the five states only
+states <- states(cb = TRUE, year = 2023) %>%
+  filter(STUSPS %in% c("PA", "OH", "MD", "NJ", "NY")) %>%
+  select(STUSPS, NAME) %>%
+  rename(state_abbr = STUSPS, state_name = NAME)
+
+# Spatial join - assign each county to one of the five states
+gwr_states <- st_join(gwr_counties, states["state_name"], join = st_within)
+
+# Filter out any counties not in your study states (just in case)
+gwr_states <- gwr_states %>%
+  filter(state_name %in% c("Pennsylvania", "Ohio", "Maryland", "New Jersey", "New York"))
+
+# Summarize GWR coefficients and R2 by state
+state_summary <- gwr_states %>%
+  st_drop_geometry() %>%
+  group_by(state_name) %>%
+  summarize(
+    mean_Intercept = mean(Intercept, na.rm = TRUE),
+    mean_Marginalized = mean(marginalized_index, na.rm = TRUE),
+    mean_Income = mean(median_income, na.rm = TRUE),
+    mean_Pop = mean(pop, na.rm = TRUE),
+    mean_R2 = mean(Local_R2, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(mean_Marginalized))
+
+# Print summary table
+print(state_summary)
+
+
+
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+

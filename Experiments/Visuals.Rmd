@@ -1,0 +1,142 @@
+---
+title: "SupplementalVisuals"
+output: html_document
+date: "2025-11-12"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Load required librarys
+library(sf)
+library(dplyr)
+library(ggplot2)
+library(viridis)
+library(tigris)
+library(ggthemes) 
+
+```
+
+
+
+This Code is for exploratory visuals, will not be featured in the Early results written analysis, as they are just supplemental and attempts that will be polished later on.
+
+
+```{r}
+
+gwr_counties <- st_read("C:/Users/niomi/Documents/DA401Project/Da401 Data/GWR_Coefficients_Counties.geojson")
+
+
+options(tigris_use_cache = TRUE)
+states <- states(cb = TRUE, year = 2023) %>%
+  filter(STUSPS %in% c("PA", "OH", "MD", "NJ", "NY")) %>%
+  select(STUSPS, NAME) %>%
+  rename(state_abbr = STUSPS, state_name = NAME) %>%
+  st_transform(st_crs(gwr_counties)) # Ensure CRS matches the county data
+
+
+study_states <- c("Pennsylvania", "Ohio", "Maryland", "New Jersey", "New York")
+
+plot_data <- gwr_counties %>%
+  # Perform spatial join to link county data back to the state names
+  st_join(states["state_name"], join = st_within) %>%
+  # Filter to only keep the 5 study states
+  filter(state_name %in% study_states)
+
+# --- MAP 1: Marginalization Index ---
+
+ggplot(plot_data) +
+  geom_sf(aes(fill = marginalized_index), color = "white", size = 0.1) +
+  # Add state borders for context
+  geom_sf(data = states, fill = NA, color = "gray30", size = 0.8) +
+  scale_fill_viridis(
+    option = "plasma", 
+    direction = -1, # Darker colors for higher marginalization
+    name = "Marginalization Index (Z-Score)"
+  ) +
+  labs(
+    title = "Socioeconomic Marginalization Across Study States",
+    subtitle = "Composite Index of Poverty, Race, Income, and Education",
+    caption = "Source: U.S. Census ACS 2023"
+  ) +
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 11),
+    legend.position = "right"
+  )
+
+
+# --- MAP 2: VIIRS Radiance (Light Pollution) ---
+
+ggplot(plot_data) +
+  geom_sf(aes(fill = y), color = "white", size = 0.1) +
+  # Add state borders for context
+  geom_sf(data = states, fill = NA, color = "gray30", size = 0.8) +
+  scale_fill_viridis(
+    option = "mako", 
+    direction = -1, # Darker colors for higher light pollution
+    name = "Radiance (nW/cm²/sr)"
+  ) +
+  labs(
+    title = "VIIRS Light Pollution Intensity (2024)",
+    subtitle = "Raw Radiance Values Across Study States",
+    caption = "Source: VIIRS 2024 Nighttime Lights"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 11),
+    legend.position = "right"
+  )
+```
+
+
+
+Plotting raw variables
+```{r}
+# Define bounding states
+study_states <- c("Pennsylvania", "Ohio", "Maryland", "New Jersey", "New York")
+
+# Filter data for your study area
+plot_data <- gwr_counties %>%
+  st_join(states["state_name"], join = st_within) %>%
+  filter(state_name %in% study_states)
+
+# Plot VIIRS Radiance (Light Pollution)
+ggplot(plot_data) +
+  geom_sf(aes(fill = y), color = "white", size = 0.1) +
+  scale_fill_viridis(option = "mako", direction = -1, name = "Radiance (nW/cm²/sr)") +
+  labs(
+    title = "VIIRS Light Pollution Intensity (2024)",
+    subtitle = "Raw Radiance Values Across Study States",
+    caption = "Source: VIIRS 2024 Nighttime Lights"
+  ) +
+  theme_minimal()
+
+# Plot Marginalization Index
+ggplot(plot_data) +
+  geom_sf(aes(fill = marginalized_index), color = "white", size = 0.1) +
+  scale_fill_viridis(option = "plasma", direction = -1, name = "Marginalization Index (Z-Score)") +
+  labs(
+    title = "Socioeconomic Marginalization Across Study States",
+    subtitle = "Composite Index of Poverty, Race, Income, and Education",
+    caption = "Source: U.S. Census ACS 2023"
+  ) +
+  theme_minimal()
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+

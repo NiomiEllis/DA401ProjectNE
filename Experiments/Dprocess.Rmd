@@ -1,0 +1,158 @@
+---
+title: "Data Processing: Light Pollution and Demographics"
+output: html_document
+date: "2025-11-07"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+
+# Load necessary libraries for spatial and census data analysis
+
+packages <- c("tidycensus", "terra", "sf", "dplyr", "tmap", "ggplot2")
+installed <- packages %in% installed.packages()
+if (any(!installed)) install.packages(packages[!installed])
+
+library(tidycensus)
+library(terra)
+library(sf)
+library(dplyr)
+library(tmap)
+library(ggplot2)
+
+# Set working directory (update if needed)
+setwd("C:/Users/niomi/Documents/DA401Project")
+
+# Confirm working directory
+getwd()
+
+
+
+
+```
+
+
+
+
+```{r}
+# STEP 1: LOAD VIIRS NIGHTTIME LIGHTS RASTER --------------------
+# Importing the VIIRS 2024 dataset that measures nighttime light intensity.
+# Only cropping to my study region (PA, OH, MD, NJ, NY) to make it manageable.
+
+viirs_path <- "DA401 Data/VNL_npp_2024_global_vcmslcfg_v2_c202502261200.average_masked.dat.tif"
+
+# Import the raster
+viirs_raster <- rast(viirs_path)
+
+# View metadata
+viirs_raster
+crs(viirs_raster)
+ext(viirs_raster)
+```
+
+
+
+```{r}
+# STEP 2: LOAD STATE BOUNDARIES FOR MY REGION -----------------
+# Define my focus states and load their geographic boundaries from ACS.
+# Using my Census API key for authenticated access.
+
+census_api_key("3252b383d918a52530783b238ee40b6fb625e43b", install = FALSE)
+
+my_states <- c("PA", "OH", "MD", "NJ", "NY")
+
+state_shapes <- get_acs(
+  geography = "state",
+  variables = "B01003_001", # total population variable (for simplicity)
+  state = my_states,
+  year = 2022,
+  survey = "acs5",
+  geometry = TRUE
+)
+
+# Convert to terra vector
+state_vect <- vect(state_shapes)
+
+# Quick plot to confirm
+plot(state_vect, main = "Study Region: PA, OH, MD, NJ, NY")
+
+```
+
+
+```{r}
+# STEP 3: CROP VIIRS RASTER TO MY STUDY REGION -----------------
+# Crop the global VIIRS raster to just my 5 states.
+# This reduces file size and focuses the analysis area.
+
+state_vect <- project(state_vect, crs(viirs_raster))
+viirs_cropped <- crop(viirs_raster, state_vect)
+viirs_masked <- mask(viirs_cropped, state_vect)
+
+# Save cropped raster for later
+writeRaster(viirs_masked, "DA401 Data/VIIRS_Region_Only.tif", overwrite = TRUE)
+
+# Visual check
+plot(viirs_masked, main = "VIIRS Nighttime Lights - Study Region")
+```
+
+
+
+```{r}
+#IMPORT CENSUS DEMOGRAPHIC DATA ------------------------
+# Pulling 2022 ACS 5-Year Estimates for county-level data.
+# Includes income, poverty, education, and racial demographics.
+
+vars <- c(
+  median_income = "B19013_001",
+  poverty_rate = "B17001_002",
+  total_pop = "B01003_001",
+  white = "B02001_002",
+  black = "B02001_003",
+  asian = "B02001_005",
+  hispanic = "B03003_003",
+  bachelors = "B15003_022"
+)
+
+acs_data <- get_acs(
+  geography = "county",
+  variables = vars,
+  state = my_states,
+  year = 2022,
+  survey = "acs5",
+  geometry = TRUE,
+  output = "wide"
+)
+
+# Quick summary of ACS data
+summary(acs_data)
+head(acs_data)
+```
+
+
+
+
+```{r}
+#STEP 5: SUMMARIZE BOTH DATASETS -------------------------------
+# Print summaries and check data structures for both VIIRS and Census data.
+
+cat("\n--- VIIRS Data Summary ---\n")
+viirs_masked
+
+cat("\n--- Census ACS Data Summary ---\n")
+glimpse(acs_data)
+
+# Quick map of one key variable
+tm_shape(acs_data) + 
+  tm_borders() + 
+  tm_fill("median_incomeE", palette = "Blues") +
+  tm_layout(main.title = "Median Household Income by County (PA, OH, MD, NJ, NY)")
+```
+
+
+
+
+
+
+
+
