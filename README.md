@@ -18,10 +18,14 @@ DA401Project/
 Setup Instructions:
 
 1. Clone or download this repository to your local computer.
+   
+3. Download data files and place in Data folder:
+   cencus: https://drive.google.com/file/d/1kVebOf6qlQfIuwKRcIbx-KLxvfjqLbhX/view?usp=sharing
+   VIIRS: https://drive.google.com/file/d/1OAY3L85oeqqDVBbesq-SDesLYmmoMzrn/view?usp=sharing
 
-2. Open RStudio and set your working directory to the project folder:
+5. Open RStudio and set your working directory to the project folder:
 
-3. setwd("path/to/DA401Project")
+6. setwd("path/to/DA401Project")
 
 
 Next, open the EarlyResults.Rmd file.
