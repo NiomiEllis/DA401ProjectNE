@@ -1,0 +1,707 @@
+---
+title: "Main Analysis - Light Pollution & Marginalization"
+output: html_document
+date: "2025-11-21"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#Downloading all of the necessary packages here
+library(sf)
+library(dplyr)
+library(ggplot2)
+library(cowplot)
+
+pkgs <- c(
+  "terra","sf","sp","dplyr","tidycensus","exactextractr","GWmodel","tmap",
+  "RColorBrewer","classInt","ggplot2","viridis","ggthemes","tigris",
+  "spdep","spgwr","raster","openxlsx","broom","car","leaflet",
+  "units","ggpubr","MASS"
+)
+
+new <- pkgs[!(pkgs %in% installed.packages()[,"Package"])]
+if(length(new)) install.packages(new, dependencies = TRUE)
+lapply(pkgs, library, character.only = TRUE)
+
+
+```
+
+##Setting Paths to assure output gets saved & exported correctly
+
+```{r}
+# Set Project root to where folder is saved
+proj_root <- "C:/Users/niomi/Documents/DA401Project/DA401ProjectNE"
+
+data_dir <- file.path(proj_root, "Data")
+fig_dir <- file.path(proj_root, "Figures")
+results_dir <- file.path(proj_root, "Results")
+utils_dir <- file.path(proj_root, "Utilities")
+
+#Creating folders if they are missing to assure code still runs
+dir.create(data_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(fig_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(results_dir, showWarnings = FALSE, recursive = TRUE)
+
+
+#Printing paths to double check
+cat("Project root:", proj_root, "\n")
+cat("Data dir:", data_dir, "\n")
+cat("Figures dir:", fig_dir, "\n")
+cat("Results dir:", results_dir, "\n")
+```
+
+
+## Loading in Data for analysis
+
+```{r}
+viirs_file <- file.path(data_dir, "VIIRS_Region_Only.tif")
+acs_file <- file.path(data_dir, "ACS_County_Data_5states.geojson")
+
+#optional existing GWR file from early results
+gwr_file <- file.path(data_dir, "GWR_Coefficients_Counties.geojson")
+
+#reading in the files:
+viirs <- terra::rast(viirs_file)
+counties_sf <- st_read(acs_file, quiet = TRUE)
+
+cat("Loaded VIIRS and ACS county geojson. Counties:", nrow(counties_sf), "\n")
+
+
+```
+
+## Creating Marganilized index
+
+```{r}
+
+#candidate name mapping (common variants)
+colnames(counties_sf) <- make.names(colnames(counties_sf))
+
+
+#Convert and impute medians
+counties_sf <- counties_sf %>%
+mutate(poverty_rate = as.numeric(poverty_rate),
+pct_nonwhite = as.numeric(pct_nonwhite),
+median_income = as.numeric(median_income),
+educ_bach_pct = as.numeric(educ_bach_pct)
+) %>%
+mutate(poverty_rate = ifelse(is.na(poverty_rate), median(poverty_rate, na.rm = TRUE), poverty_rate),
+pct_nonwhite = ifelse(is.na(pct_nonwhite), median(pct_nonwhite, na.rm = TRUE), pct_nonwhite),
+median_income = ifelse(is.na(median_income), median(median_income, na.rm = TRUE), median_income),
+educ_bach_pct = ifelse(is.na(educ_bach_pct), median(educ_bach_pct, na.rm = TRUE), educ_bach_pct)
+)
+
+#Compute z-scores & marginalized index
+counties_sf <- counties_sf %>%
+mutate(z_poverty = as.numeric(scale(poverty_rate)),
+z_nonwhite = as.numeric(scale(pct_nonwhite)),
+z_medincome = as.numeric(scale(median_income)),
+z_edu = as.numeric(scale(educ_bach_pct)),
+marginalized_index_raw = z_poverty + z_nonwhite - z_medincome - z_edu,
+marginalized_index = as.numeric(scale(marginalized_index_raw))
+)
+
+
+
+#Flag top 30% as marginalized
+threshold <- quantile(counties_sf$marginalized_index, probs = 0.70, na.rm = TRUE)
+counties_sf <- counties_sf %>% mutate(marginalized_flag = ifelse(marginalized_index >= threshold, 1, 0))
+
+#Add VIIRS mean extraction if not already present
+if(!"viirs_mean" %in% names(counties_sf)){
+
+counties_proj <- st_transform(counties_sf, crs = st_crs(viirs))
+
+viirs_raster <- raster::raster(viirs_file)
+
+counties_proj$viirs_mean <- exactextractr::exact_extract(
+viirs_raster, counties_proj, 'mean'
+)
+
+counties_sf <- counties_sf %>%
+left_join(
+counties_proj %>% st_drop_geometry() %>% dplyr::select(GEOID, viirs_mean),
+by = "GEOID"
+)
+}
+
+summary(counties_sf$marginalized_index)
+summary(counties_sf$viirs_mean)
+
+
+```
+
+
+## Exploratory visual to see raw values before executing GWR 
+
+```{r}
+## Map of Marginalized Index Across Counties
+
+# Ensure geometry is valid
+counties_sf <- st_make_valid(counties_sf)
+
+# Get state boundaries for your five states
+states_sf <- tigris::states(cb = TRUE) %>%
+  filter(STUSPS %in% c("OH", "PA", "NY", "NJ", "MD")) %>%
+  st_transform(st_crs(counties_sf))
+
+# Transform counties to the same CRS as states (usually unnecessary but safe)
+counties_plot <- st_transform(counties_sf, st_crs(states_sf))
+
+# Plot marginalized index
+ggplot() +
+  geom_sf(data = counties_plot, aes(fill = marginalized_index), color = NA) +
+  geom_sf(data = states_sf, fill = NA, color = "black", size = 0.6) +
+  scale_fill_viridis_c(option = "plasma", name = "Marginalized Index") +
+  labs(
+    title = "Marginalized Index Across Counties",
+    subtitle = "OH, PA, NY, NJ, and MD"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    plot.title = element_text(size = 15, face = "bold"),
+    plot.subtitle = element_text(size = 12)
+  )
+
+
+```
+
+```{r}
+# Map: VIIRS Mean Radiance
+
+ggplot() +
+  geom_sf(data = counties_plot, aes(fill = viirs_mean), color = NA) +
+  geom_sf(data = states_sf, fill = NA, color = "black", size = 0.6) +
+  scale_fill_viridis_c(option = "magma", name = "VIIRS Mean Radiance", na.value = "grey80") +
+  labs(
+    title = "VIIRS Nighttime Radiance",
+    subtitle = "OH, PA, NY, NJ, and MD"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    plot.title = element_text(size = 15, face = "bold"),
+    plot.subtitle = element_text(size = 12)
+  )
+```
+
+```{r}
+## Map: Poverty Rate
+
+ggplot() +
+  geom_sf(data = counties_plot, aes(fill = poverty_rate), color = NA) +
+  geom_sf(data = states_sf, fill = NA, color = "black", size = 0.6) +
+  scale_fill_viridis_c(option = "cividis", name = "Poverty Rate (%)", na.value = "grey80") +
+  labs(
+    title = "County-Level Poverty Rate",
+    subtitle = "OH, PA, NY, NJ, and MD"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    plot.title = element_text(size = 15, face = "bold"),
+    plot.subtitle = element_text(size = 12)
+  )
+
+```
+
+
+```{r}
+## Map: Percent Nonwhite
+
+ggplot() +
+  geom_sf(data = counties_plot, aes(fill = pct_nonwhite), color = NA) +
+  geom_sf(data = states_sf, fill = NA, color = "black", size = 0.6) +
+  scale_fill_viridis_c(option = "inferno", name = "Percent Nonwhite", na.value = "grey80") +
+  labs(
+    title = "Percent Nonwhite by County",
+    subtitle = "OH, PA, NY, NJ, and MD"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    plot.title = element_text(size = 15, face = "bold"),
+    plot.subtitle = element_text(size = 12)
+  )
+
+```
+
+
+### Exporting the exploratory visuals 
+```{r}
+
+## Side-by-Side Panel and Save to Figures Folder
+
+# 1. Marginalized Index Map
+p_marg <- ggplot() +
+  geom_sf(data = counties_plot, aes(fill = marginalized_index), color = NA) +
+  geom_sf(data = states_sf, fill = NA, color = "black", size = 0.5) +
+  scale_fill_viridis_c(option = "viridis", name = "Marg. Index") +
+  labs(title = "Marginalized Index") +
+  theme_minimal() +
+  theme(panel.grid = element_blank())
+
+# 2. VIIRS Radiance Map
+p_viirs <- ggplot() +
+  geom_sf(data = counties_plot, aes(fill = viirs_mean), color = NA) +
+  geom_sf(data = states_sf, fill = NA, color = "black", size = 0.5) +
+  scale_fill_viridis_c(option = "magma", name = "Radiance") +
+  labs(title = "VIIRS Mean Radiance") +
+  theme_minimal() +
+  theme(panel.grid = element_blank())
+
+# 3. Poverty Rate Map
+p_poverty <- ggplot() +
+  geom_sf(data = counties_plot, aes(fill = poverty_rate), color = NA) +
+  geom_sf(data = states_sf, fill = NA, color = "black", size = 0.5) +
+  scale_fill_viridis_c(option = "cividis", name = "Poverty") +
+  labs(title = "Poverty Rate (%)") +
+  theme_minimal() +
+  theme(panel.grid = element_blank())
+
+# 4. Percent Nonwhite Map
+p_nonwhite <- ggplot() +
+  geom_sf(data = counties_plot, aes(fill = pct_nonwhite), color = NA) +
+  geom_sf(data = states_sf, fill = NA, color = "black", size = 0.5) +
+  scale_fill_viridis_c(option = "inferno", name = "% Nonwhite") +
+  labs(title = "Percent Nonwhite") +
+  theme_minimal() +
+  theme(panel.grid = element_blank())
+
+
+
+## Combine into 2×2 grid
+
+final_grid <- cowplot::plot_grid(
+  p_marg, p_viirs,
+  p_poverty, p_nonwhite,
+  labels = "AUTO",
+  ncol = 2
+)
+
+# Display in RStudio viewer
+final_grid
+
+
+## Save grid in Figures folder
+
+
+output_path <- file.path(fig_dir, "County_Comparison_Grid.png")
+
+ggsave(
+  filename = output_path,
+  plot = final_grid,
+  width = 12,
+  height = 10,
+  dpi = 300
+)
+#Quick check
+cat("Saved comparison panel to:", output_path, "\n")
+
+```
+
+
+
+## GWR and attempted OLS
+```{r}
+## ---- GWR (direct radiance), OLS with county fixed effects, and significance maps ----
+
+# Ensure CRS and geometry are OK
+counties_sf <- st_make_valid(counties_sf)
+counties_sf <- st_transform(counties_sf, st_crs(counties_sf))  # ensure consistent CRS
+
+# Subset to counties with radiance
+gwr_sf <- counties_sf %>% filter(!is.na(viirs_mean))
+
+# --- Build formula including pop
+gwr_formula <- viirs_mean ~ marginalized_index + median_income + pop
+
+# Convert to Spatial (for GWmodel)
+gwr_sp <- as(gwr_sf, "Spatial")
+
+# --- Bandwidth selection and GWR
+bw_direct <- bw.gwr(gwr_formula, data = gwr_sp, approach = "CV", adaptive = TRUE)
+cat("GWR bandwidth (adaptive) for direct radiance:", bw_direct, "\n")
+
+gwr_direct <- gwr.basic(gwr_formula, data = gwr_sp, bw = bw_direct, adaptive = TRUE)
+
+# Convert GWR results SDF to sf
+gwr_direct_sf <- st_as_sf(gwr_direct$SDF)
+
+# Save GWR outputs
+st_write(gwr_direct_sf, file.path(data_dir, "GWR_DirectRadiance_Coefficients.geojson"), delete_dsn = TRUE, quiet = TRUE)
+openxlsx::write.xlsx(st_drop_geometry(gwr_direct_sf), file.path(results_dir, "GWR_DirectRadiance_Coefficients.xlsx"), overwrite = TRUE)
+
+# --- OLS: global model, not sure if best approach, will follow up with this
+ols_df <- gwr_sf %>% st_drop_geometry()
+
+# Global OLS (no FE)
+ols_global <- lm(gwr_formula, data = ols_df)
+
+# OLS with county fixed effects (factor(GEOID))
+ols_fe <- lm(update(gwr_formula, . ~ . + factor(GEOID) - 1), data = ols_df)
+
+# Save OLS summaries
+capture.output(summary(ols_global), file = file.path(results_dir, "OLS_global_summary.txt"))
+capture.output(summary(ols_fe), file = file.path(results_dir, "OLS_FE_summary.txt"))
+
+```
+
+
+
+
+
+```{r}
+
+# VIF for global OLS
+vif_vals <- car::vif(ols_global)
+write.csv(data.frame(variable = names(vif_vals), VIF = as.numeric(vif_vals)),
+          file = file.path(results_dir, "OLS_global_VIFs.csv"), row.names = FALSE)
+
+# --- Local t-values / p-values for marginalized coefficient ---
+sdf <- gwr_direct$SDF
+coef_candidates <- names(sdf)[grepl("marginal", tolower(names(sdf)))]
+coef_col <- coef_candidates[1]
+
+se_candidates <- names(sdf)[grepl("se|std|stderr", tolower(names(sdf)))]
+possible_se <- intersect(c(paste0(coef_col, ".se"), paste0(coef_col, "_SE")), se_candidates)
+
+gwr_direct_sf2 <- st_as_sf(sdf)
+
+#check
+if(length(coef_col) > 0 & length(possible_se) > 0){
+  se_col <- possible_se[1]
+  gwr_direct_sf2$local_t_marginalized <- gwr_direct_sf2[[coef_col]] / gwr_direct_sf2[[se_col]]
+  n_obs <- nrow(gwr_direct_sf2)
+  k_par <- length(all.vars(gwr_formula))
+  df_resid <- pmax(n_obs - k_par, 1)
+  gwr_direct_sf2$local_p_marginalized <- 2 * (1 - pnorm(abs(gwr_direct_sf2$local_t_marginalized)))
+  
+  # Saving the table
+  openxlsx::write.xlsx(st_drop_geometry(gwr_direct_sf2)[, c(coef_col, se_col, "local_t_marginalized", "local_p_marginalized")],
+                       file.path(results_dir, "GWR_local_t_p_marginalized.xlsx"), overwrite = TRUE)
+} else {
+  writeLines("No standard error column detected; cannot compute local t/p-values.", 
+             con = file.path(results_dir, "gwr_sdf_colnames.txt"))
+}
+```
+
+
+
+## GWR Choropleth Map and R2/Signifigance visual
+
+```{r}
+
+# --- Choropleth maps ---
+states_sf <- states(cb = TRUE) %>% 
+  filter(STUSPS %in% c("PA","OH","NY","NJ","MD")) %>% 
+  st_transform(st_crs(gwr_direct_sf))
+
+# Coefficient map
+if(!is.null(coef_col) && coef_col %in% names(gwr_direct_sf)){
+  lower_lim <- quantile(gwr_direct_sf[[coef_col]], 0.05, na.rm = TRUE)
+  upper_lim <- quantile(gwr_direct_sf[[coef_col]], 0.95, na.rm = TRUE)
+  
+  p_coef <- ggplot() +
+    geom_sf(data = gwr_direct_sf, aes_string(fill = coef_col), color = "white", size = 0.05) +
+    geom_sf(data = states_sf, fill = NA, color = "black", size = 0.6) +
+    scale_fill_viridis_c(option = "mako", direction = -1, limits = c(lower_lim, upper_lim), name = "GWR coef") +
+    labs(title = paste("GWR Coefficient:", coef_col), subtitle = "Direct radiance") +
+    theme_minimal() + theme(panel.grid = element_blank())
+  
+  ggsave(file.path(fig_dir, "GWR_direct_marginalized_coef_map.png"), plot = p_coef, width = 9, height = 7, dpi = 300)
+}
+
+# Significance map (if local_t exists)
+if("local_t_marginalized" %in% names(gwr_direct_sf2)){
+  gwr_direct_sf2$local_sig05 <- ifelse(abs(gwr_direct_sf2$local_t_marginalized) > 1.96, 1, 0)
+  
+  p_sigmask <- ggplot() +
+    geom_sf(data = gwr_direct_sf2, aes(fill = as.factor(local_sig05)), color = "white", size = 0.05) +
+    geom_sf(data = states_sf, fill = NA, color = "black", size = 0.6) +
+    scale_fill_manual(values = c("0" = "grey90", "1" = "red"), name = "Significant (p<0.05)") +
+    labs(title = "Local significance (marginalized coef, alpha=0.05)") +
+    theme_minimal() + theme(panel.grid = element_blank())
+  
+  ggsave(file.path(fig_dir, "GWR_direct_local_significance_marginalized.png"), plot = p_sigmask, width = 9, height = 7, dpi = 300)
+}
+
+cat("GWR (direct radiance) and OLS FE outputs saved to Data/, Results/, and Figures/.\n")
+```
+
+
+
+### Fixing Choropleth and R2 for correct output
+```{r}
+# ---- Load new GWR output
+gwr_counties <- st_read(file.path(data_dir, "GWR_DirectRadiance_Coefficients.geojson"))
+
+# Ensure valid geometry
+gwr_counties <- st_make_valid(gwr_counties)
+
+# ---- Load state boundaries
+states_sf <- states(cb = TRUE) %>%
+  filter(STUSPS %in% c("PA", "OH", "NY", "NJ", "MD")) %>%
+  st_transform(st_crs(gwr_counties))
+
+# ---- Choropleth: Marginalized Index Coefficient
+coef_vals <- gwr_counties$marginalized_index
+lower_lim <- quantile(coef_vals, 0.05, na.rm = TRUE)
+upper_lim <- quantile(coef_vals, 0.95, na.rm = TRUE)
+
+p_coef <- ggplot() +
+  geom_sf(data = gwr_counties, aes(fill = marginalized_index), color = "white", size = 0.1) +
+  geom_sf(data = states_sf, fill = NA, color = "gray30", size = 0.8) +
+  scale_fill_viridis(
+    option = "mako",
+    direction = -1,
+    limits = c(lower_lim, upper_lim),
+    name = "GWR Coefficient"
+  ) +
+  labs(
+    title = "Geographically Weighted Regression Coefficients by County",
+    subtitle = "Marginalization Index Effect on Light Pollution (VIIRS, 2024)",
+    caption = "Source: VIIRS 2024 data and Census ACS 2023"
+  ) +
+  theme_map() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 11),
+    legend.position = "right",
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 8)
+  )
+
+# Savin coefficient map
+ggsave(file.path(fig_dir, "GWR_direct_marginalized_coef_map.png"), plot = p_coef, width = 9, height = 7, dpi = 300)
+
+# ---- Choropleth: Local R2
+lower_lim_r2 <- quantile(gwr_counties$Local_R2, 0.05, na.rm = TRUE)
+upper_lim_r2 <- quantile(gwr_counties$Local_R2, 0.95, na.rm = TRUE)
+
+p_r2 <- ggplot() +
+  geom_sf(data = gwr_counties, aes(fill = Local_R2), color = "white", size = 0.1) +
+  geom_sf(data = states_sf, fill = NA, color = "gray30", size = 0.8) +
+  scale_fill_viridis(
+    option = "plasma",
+    direction = -1,
+    limits = c(lower_lim_r2, upper_lim_r2),
+    name = "Local R²"
+  ) +
+  labs(
+    title = "Local R² of GWR Model by County",
+    subtitle = "Strength of Relationship Between Marginalization and Light Pollution (VIIRS, 2024)",
+    caption = "Source: VIIRS 2024 data and Census ACS 2023"
+  ) +
+  theme_map() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 11),
+    legend.position = "right",
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 8)
+  )
+
+# Save Local R map
+ggsave(file.path(fig_dir, "GWR_direct_localR2_map.png"), plot = p_r2, width = 9, height = 7, dpi = 300)
+
+cat("Choropleth maps for coefficients and Local R² saved to Figures folder.\n")
+
+```
+
+
+#Adding interaction term to GWR (% non-white and marginalized)
+
+```{r}
+# Create interaction term
+counties_sf <- counties_sf %>%
+  mutate(marg_x_nonwhite = marginalized_index * pct_nonwhite)
+
+# Filter valid counties and convert
+gwr_sf2 <- counties_sf %>% filter(!is.na(viirs_mean))
+gwr_sp2 <- as(gwr_sf2, "Spatial")
+
+# GWR formula with interaction
+gwr_formula_inter <- viirs_mean ~ marginalized_index + pct_nonwhite + marg_x_nonwhite
+
+# Bandwidth selection
+bw2 <- bw.gwr(gwr_formula_inter, data = gwr_sp2, approach = "CV", adaptive = TRUE)
+
+# Run GWR
+gwr_res2 <- gwr.basic(gwr_formula_inter, data = gwr_sp2, bw = bw2, adaptive = TRUE)
+
+# Save coefficients
+coeffs_sf2 <- st_as_sf(gwr_res2$SDF)
+st_write(coeffs_sf2, file.path(data_dir, "GWR_marginalized_interaction.geojson"), delete_dsn = TRUE, quiet = TRUE)
+
+```
+
+
+# Choropleth of interaction coeff added
+
+```{r}
+# Limits
+coef_vals2 <- coeffs_sf2$marg_x_nonwhite
+lower_lim2 <- quantile(coef_vals2, 0.05, na.rm = TRUE)
+upper_lim2 <- quantile(coef_vals2, 0.95, na.rm = TRUE)
+
+# Plot
+ggplot() +
+  geom_sf(data = coeffs_sf2, aes(fill = marg_x_nonwhite), color = "white", size = 0.1) +
+  geom_sf(data = states_sf, fill = NA, color = "gray30", size = 0.8) +
+  scale_fill_viridis(option = "mako", direction = -1, limits = c(lower_lim2, upper_lim2), name = "Interaction Coef") +
+  labs(title = "GWR Coefficients: Marginalized × % Nonwhite", 
+       subtitle = "Interaction Effect on Light Pollution", 
+       caption = "Source: VIIRS 2024 and ACS 2023") +
+  theme_map() +
+  theme(plot.title = element_text(face = "bold"))
+
+ggsave(file.path(fig_dir, "GWR_interaction_map.png"), width = 9, height = 7, dpi = 300)
+
+```
+
+
+## GWR non-white only
+```{r}
+gwr_formula_nonwhite <- viirs_mean ~ pct_nonwhite
+bw3 <- bw.gwr(gwr_formula_nonwhite, data = gwr_sp, approach = "CV", adaptive = TRUE)
+gwr_res3 <- gwr.basic(gwr_formula_nonwhite, data = gwr_sp, bw = bw3, adaptive = TRUE)
+
+coeffs_sf3 <- st_as_sf(gwr_res3$SDF)
+st_write(coeffs_sf3, file.path(data_dir, "GWR_nonwhite_only.geojson"), delete_dsn = TRUE, quiet = TRUE)
+
+# Plot non-white coefficient
+coef_vals3 <- coeffs_sf3$pct_nonwhite
+lower_lim3 <- quantile(coef_vals3, 0.05, na.rm = TRUE)
+upper_lim3 <- quantile(coef_vals3, 0.95, na.rm = TRUE)
+
+ggplot() +
+  geom_sf(data = coeffs_sf3, aes(fill = pct_nonwhite), color = "white", size = 0.1) +
+  geom_sf(data = states_sf, fill = NA, color = "gray30", size = 0.8) +
+  scale_fill_viridis(option = "mako", direction = -1, limits = c(lower_lim3, upper_lim3), name = "% Nonwhite Coef") +
+  labs(title = "GWR Coefficients: % Nonwhite Only", 
+       subtitle = "Effect on Light Pollution", 
+       caption = "Source: VIIRS 2024 and ACS 2023") +
+  theme_map() +
+  theme(plot.title = element_text(face = "bold"))
+
+ggsave(file.path(fig_dir, "GWR_nonwhite_only_map.png"), width = 9, height = 7, dpi = 300)
+
+```
+
+
+
+
+
+## Running statistical test (local sig t values and Morans)
+```{r}
+# Use gwr_direct_sf2 which already exists
+coeffs_sf <- gwr_direct_sf2
+
+# Compute t-value
+coeffs_sf$local_t_marg <- coeffs_sf[[coef_col]] / coeffs_sf[[se_col]]
+
+# Plot
+ggplot() +
+  geom_sf(data = coeffs_sf, aes(fill = abs(local_t_marg)), color = "white", size = 0.1) +
+  geom_sf(data = states_sf, fill = NA, color = "gray30", size = 0.8) +
+  scale_fill_viridis(option = "magma", direction = -1, name = "|t|") +
+  labs(
+    title = "Local t-values: Marginalized Index",
+    subtitle = "Significance of GWR coefficients",
+    caption = "Source: VIIRS 2024 and ACS 2023"
+  ) +
+  theme_map() +
+  theme(plot.title = element_text(face = "bold"))
+
+ggsave(file.path(fig_dir, "GWR_local_t_map.png"), width = 9, height = 7, dpi = 300)
+
+# Moran's I for residuals
+library(spdep)
+resid_ols <- residuals(ols_model)
+coords <- st_coordinates(st_centroid(counties_sf))
+nb <- knn2nb(knearneigh(coords, k = 4))
+lw <- nb2listw(nb, style = "W")
+moran_test <- moran.test(resid_ols, lw)
+print(moran_test)
+```
+
+
+
+
+## Extra Visuals & Credibility Checks
+
+
+
+### Small multiples panel (Coefficint and T-value side by side)
+
+```{r}
+# Reshape the GWR results
+panel_df <- gwr_data %>%
+  dplyr::select(marginalized_index, marginalized_index_TV, geometry) %>%
+  pivot_longer(
+    cols = -geometry,
+    names_to = "variable",
+    values_to = "value"
+  )
+
+ggplot(panel_df) +
+  geom_sf(aes(fill = value), color = NA) +
+  scale_fill_viridis_c() +
+  facet_wrap(~ variable, ncol = 2) +
+  theme_minimal() +
+  labs(
+    title = "GWR Coefficient and Local t-values for Marginalization Index",
+    fill  = ""
+  )
+
+```
+
+### Bubble map
+
+```{r}
+centroids <- st_centroid(gwr_data)
+
+ggplot() +
+  geom_sf(data = gwr_data, fill = "gray95", color = NA) +
+  geom_point(
+    data = centroids,
+    aes(
+      x = st_coordinates(centroids)[,1],
+      y = st_coordinates(centroids)[,2],
+      color = marginalized_index,
+      size = abs(marginalized_index_TV)
+    ),
+    alpha = 0.7
+  ) +
+  scale_color_viridis_c() +
+  scale_size(range = c(0.5, 6)) +
+  theme_minimal() +
+  labs(
+    title = "GWR Results: Coefficients (color) and t-values (size)",
+    color = "Coefficient",
+    size = "|t-value|"
+  )
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
