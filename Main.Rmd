@@ -229,50 +229,70 @@ ggplot() +
 
 
 ### Exporting the exploratory visuals 
-```{r}
 
+
+```{r}
 ## Side-by-Side Panel and Save to Figures Folder
 
+#Making the base theme for all visuals for readability
+# --------------------------------------------------
+theme_map <- theme_minimal(base_size = 14) +
+  theme(
+    panel.grid = element_blank(),
+    plot.title = element_text(size = 18, face = "bold"),
+    axis.title = element_text(size = 14, face = "bold"),
+    legend.title = element_text(size = 13, face = "bold"),
+    legend.text = element_text(size = 12)
+  )
+
+
+
 # 1. Marginalized Index Map
+# --------------------------------------------------
 p_marg <- ggplot() +
   geom_sf(data = counties_plot, aes(fill = marginalized_index), color = NA) +
   geom_sf(data = states_sf, fill = NA, color = "black", size = 0.5) +
   scale_fill_viridis_c(option = "viridis", name = "Marg. Index") +
   labs(title = "Marginalized Index") +
-  theme_minimal() +
-  theme(panel.grid = element_blank())
+  theme_map   
+
+
 
 # 2. VIIRS Radiance Map
+# --------------------------------------------------
 p_viirs <- ggplot() +
   geom_sf(data = counties_plot, aes(fill = viirs_mean), color = NA) +
   geom_sf(data = states_sf, fill = NA, color = "black", size = 0.5) +
   scale_fill_viridis_c(option = "magma", name = "Radiance") +
   labs(title = "VIIRS Mean Radiance") +
-  theme_minimal() +
-  theme(panel.grid = element_blank())
+  theme_map  
+
+
 
 # 3. Poverty Rate Map
+# --------------------------------------------------
 p_poverty <- ggplot() +
   geom_sf(data = counties_plot, aes(fill = poverty_rate), color = NA) +
   geom_sf(data = states_sf, fill = NA, color = "black", size = 0.5) +
-  scale_fill_viridis_c(option = "cividis", name = "Poverty") +
+  scale_fill_viridis_c(option = "cividis", name = "Poverty Rate (%)") +
   labs(title = "Poverty Rate (%)") +
-  theme_minimal() +
-  theme(panel.grid = element_blank())
+  theme_map   
+
+
 
 # 4. Percent Nonwhite Map
+# --------------------------------------------------
 p_nonwhite <- ggplot() +
   geom_sf(data = counties_plot, aes(fill = pct_nonwhite), color = NA) +
   geom_sf(data = states_sf, fill = NA, color = "black", size = 0.5) +
   scale_fill_viridis_c(option = "inferno", name = "% Nonwhite") +
   labs(title = "Percent Nonwhite") +
-  theme_minimal() +
-  theme(panel.grid = element_blank())
+  theme_map   
 
 
 
-## Combine into 2×2 grid
-
+#  Combining into 2×2 grid
+# --------------------------------------------------
 final_grid <- cowplot::plot_grid(
   p_marg, p_viirs,
   p_poverty, p_nonwhite,
@@ -280,26 +300,32 @@ final_grid <- cowplot::plot_grid(
   ncol = 2
 )
 
-# Display in RStudio viewer
+# View in RStudio
 final_grid
 
 
-## Save grid in Figures folder
-
-
+# --------------------------------------------------
+#  SAVE IN HIGH RESOLUTION (300 DPI)
+# --------------------------------------------------
 output_path <- file.path(fig_dir, "County_Comparison_Grid.png")
 
 ggsave(
   filename = output_path,
   plot = final_grid,
-  width = 12,
-  height = 10,
-  dpi = 300
+  width = 14,      
+  height = 12,
+  dpi = 320        
 )
-#Quick check
-cat("Saved comparison panel to:", output_path, "\n")
 
+cat("Saved comparison panel to:", output_path, "\n")
 ```
+
+
+
+
+
+
+
 
 
 
@@ -445,6 +471,20 @@ states_sf <- states(cb = TRUE) %>%
   filter(STUSPS %in% c("PA", "OH", "NY", "NJ", "MD")) %>%
   st_transform(st_crs(gwr_counties))
 
+
+#  THEME FOR READABILITY (BOLD, DARK TEXT)
+# --------------------------------------------------
+theme_gwr <- theme_minimal(base_size = 14) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text = element_text(color = "black"),   # <-- darker axis text
+    axis.title = element_text(size = 14, face = "bold", color = "black"),
+    plot.title = element_text(size = 18, face = "bold", color = "black"),
+    plot.subtitle = element_text(size = 13, color = "black"),
+    legend.title = element_text(size = 13, face = "bold", color = "black"),
+    legend.text = element_text(size = 11, color = "black")
+  )
+
 # ---- Choropleth: Marginalized Index Coefficient
 coef_vals <- gwr_counties$marginalized_index
 lower_lim <- quantile(coef_vals, 0.05, na.rm = TRUE)
@@ -463,18 +503,16 @@ p_coef <- ggplot() +
     title = "Geographically Weighted Regression Coefficients by County",
     subtitle = "Marginalization Index Effect on Light Pollution (VIIRS, 2024)",
     caption = "Source: VIIRS 2024 data and Census ACS 2023"
-  ) +
-  theme_map() +
-  theme(
-    plot.title = element_text(size = 14, face = "bold"),
-    plot.subtitle = element_text(size = 11),
-    legend.position = "right",
-    legend.title = element_text(size = 10),
-    legend.text = element_text(size = 8)
-  )
+  ) + theme_gwr
 
 # Savin coefficient map
-ggsave(file.path(fig_dir, "GWR_direct_marginalized_coef_map.png"), plot = p_coef, width = 9, height = 7, dpi = 300)
+ggsave(
+  file.path(fig_dir, "GWR_direct_marginalized_coef_map.png"),
+  plot = p_coef,
+  width = 11,      
+  height = 9,
+  dpi = 320        
+)
 
 # ---- Choropleth: Local R2
 lower_lim_r2 <- quantile(gwr_counties$Local_R2, 0.05, na.rm = TRUE)
@@ -493,18 +531,16 @@ p_r2 <- ggplot() +
     title = "Local R² of GWR Model by County",
     subtitle = "Strength of Relationship Between Marginalization and Light Pollution (VIIRS, 2024)",
     caption = "Source: VIIRS 2024 data and Census ACS 2023"
-  ) +
-  theme_map() +
-  theme(
-    plot.title = element_text(size = 14, face = "bold"),
-    plot.subtitle = element_text(size = 11),
-    legend.position = "right",
-    legend.title = element_text(size = 10),
-    legend.text = element_text(size = 8)
-  )
+  ) + theme_gwr
 
 # Save Local R map
-ggsave(file.path(fig_dir, "GWR_direct_localR2_map.png"), plot = p_r2, width = 9, height = 7, dpi = 300)
+ggsave(
+  file.path(fig_dir, "GWR_direct_localR2_map.png"),
+  plot = p_r2,
+  width = 11,
+  height = 9,
+  dpi = 320
+)
 
 cat("Choropleth maps for coefficients and Local R² saved to Figures folder.\n")
 
